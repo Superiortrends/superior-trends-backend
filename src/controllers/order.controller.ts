@@ -271,7 +271,7 @@ export const createCheckoutOrder = async (req: Request, res: Response, next: Nex
       tax = 0,
       total,
       notes,
-      paymentMethod = 'RAZORPAY',
+      paymentMethod = 'THAWANI',
     } = req.body;
 
     if (!shippingAddress || !Array.isArray(items) || items.length === 0) {
@@ -282,9 +282,9 @@ export const createCheckoutOrder = async (req: Request, res: Response, next: Nex
       return next(new AppError('Valid order total is required', 400));
     }
 
-    const method = String(paymentMethod || 'RAZORPAY').toUpperCase();
-    if (method !== 'RAZORPAY' && method !== 'COD') {
-      return next(new AppError('Payment method must be RAZORPAY or COD', 400));
+    const method = String(paymentMethod || 'THAWANI').toUpperCase();
+    if (method !== 'THAWANI' && method !== 'COD') {
+      return next(new AppError('Payment method must be THAWANI or COD', 400));
     }
 
     if (method === 'COD') {

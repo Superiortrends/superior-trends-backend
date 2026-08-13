@@ -1,22 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import crypto from 'crypto';
-import Razorpay from 'razorpay';
 import { prisma } from '../config/db.js';
 import { env } from '../config/env.js';
 import { AppError } from '../middlewares/error.middleware.js';
 
-// Initialize Razorpay conditionally (to avoid crashes if keys are empty/missing)
-const getRazorpayInstance = () => {
-  if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
-    throw new AppError('Razorpay credentials are not configured on the server', 500);
-  }
-  return new Razorpay({
-    key_id: env.RAZORPAY_KEY_ID,
-    key_secret: env.RAZORPAY_KEY_SECRET,
-  });
-};
-
-export const createRazorpayOrder = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+export const createThawaniSession = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { orderId } = req.body;
 
@@ -32,35 +19,95 @@ export const createRazorpayOrder = async (req: Request, res: Response, next: Nex
       return next(new AppError('Order not found', 404));
     }
 
-    const razorpay = getRazorpayInstance();
+    // Safety Check: Ensure the logged-in user owns this order
+    if (order.userId !== (req as any).user?.id) {
+      return next(new AppError('Unauthorized: You do not own this order', 403));
+    }
 
-    // Razorpay amount is in baisa (1 OMR = 1000 baisa)
-    const amountInPaise = Math.round(Number(order.total) * 100);
+    if (!env.THAWANI_API_KEY || !env.THAWANI_PUBLISHABLE_KEY) {
+      return next(new AppError('Thawani credentials are not configured on the server', 500));
+    }
 
-    const options = {
-      amount: amountInPaise,
-      currency: 'OMR',
-      receipt: order.orderNumber,
-    };
+    const baseUrl = env.THAWANI_ENV === 'prod' ? 'https://checkout.thawani.om' : 'https://uatcheckout.thawani.om';
+    
+    // Amount in baisas (1 OMR = 1000 baisa)
+    const amountInBaisa = Math.round(Number(order.total) * 1000);
 
-    const razorpayOrder = await razorpay.orders.create(options);
+    const shipping = order.shippingAddress as any;
+    const customerName = `${shipping?.firstName || ''} ${shipping?.lastName || ''}`.trim() || 'Customer';
+    const customerEmail = shipping?.email || (req as any).user?.email || '';
+    const customerPhone = shipping?.phone || '';
+
+    // Dynamically fetch frontend origin from headers
+    let frontendUrl = env.FRONTEND_URL;
+    if (req.headers.origin) {
+      frontendUrl = req.headers.origin;
+    } else if (req.headers.referer) {
+      try {
+        const parsedUrl = new URL(req.headers.referer);
+        frontendUrl = parsedUrl.origin;
+      } catch (e) {
+        // Fallback to env.FRONTEND_URL
+      }
+    }
+    if (frontendUrl.endsWith('/')) {
+      frontendUrl = frontendUrl.slice(0, -1);
+    }
+
+    const response = await fetch(`${baseUrl}/api/v1/checkout/session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'thawani-api-key': env.THAWANI_API_KEY,
+      },
+      body: JSON.stringify({
+        client_reference_id: order.id,
+        mode: 'payment',
+        products: [
+          {
+            name: `Order #${order.orderNumber}`,
+            unit_amount: amountInBaisa,
+            quantity: 1,
+          },
+        ],
+        success_url: `${frontendUrl}/payment/thawani-callback?status=success&order_id=${order.id}`,
+        cancel_url: `${frontendUrl}/payment/thawani-callback?status=cancel&order_id=${order.id}`,
+        metadata: {
+          customer_name: customerName,
+          customer_email: customerEmail,
+          customer_phone: customerPhone,
+          order_id: order.id,
+          refund_policy_url: `${frontendUrl}/refund-policy`,
+        },
+      }),
+    });
+
+    const result = await response.json() as any;
+
+    if (!response.ok || !result.success) {
+      return next(new AppError(result.message || 'Failed to create Thawani checkout session', 400));
+    }
+
+    const thawaniSessionId = result.data.session_id;
+    const redirectUrl = `${baseUrl}/pay/${thawaniSessionId}?key=${env.THAWANI_PUBLISHABLE_KEY}`;
 
     // Save/Update payment record in DB
     await prisma.payment.create({
       data: {
         orderId: order.id,
-        paymentMethod: 'RAZORPAY',
+        paymentMethod: 'THAWANI',
         paymentStatus: 'PENDING',
-        razorpayOrderId: razorpayOrder.id,
+        razorpayOrderId: thawaniSessionId, // Using razorpayOrderId to store session ID to avoid migration
         amount: order.total,
+        transactionData: { thawaniSessionId } as any,
       },
     });
 
     res.status(200).json({
       status: 'success',
       data: {
-        razorpayOrder,
-        keyId: env.RAZORPAY_KEY_ID,
+        thawaniSessionId,
+        redirectUrl,
       },
     });
   } catch (error) {
@@ -68,52 +115,74 @@ export const createRazorpayOrder = async (req: Request, res: Response, next: Nex
   }
 };
 
-export const verifyRazorpayPayment = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+export const verifyThawaniPayment = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { razorpayPaymentId, razorpayOrderId, razorpaySignature } = req.body;
+    const { orderId } = req.body;
 
-    if (!razorpayPaymentId || !razorpayOrderId || !razorpaySignature) {
-      return next(new AppError('Payment verification details (paymentId, orderId, signature) are required', 400));
+    if (!orderId) {
+      return next(new AppError('Order ID is required', 400));
     }
 
-    // Verify cryptographic signature
-    const body = razorpayOrderId + '|' + razorpayPaymentId;
-    const expectedSignature = crypto
-      .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
-      .update(body.toString())
-      .digest('hex');
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+    });
 
-    const isAuthentic = expectedSignature === razorpaySignature;
-
-    if (!isAuthentic) {
-      // Mark payment failed in DB
-      await prisma.payment.updateMany({
-        where: { razorpayOrderId },
-        data: { paymentStatus: 'FAILED' },
-      });
-      return next(new AppError('Payment signature verification failed', 400));
+    if (!order) {
+      return next(new AppError('Order not found', 404));
     }
 
-    // Update payment record
-    const updatedPayments = await prisma.payment.updateMany({
-      where: { razorpayOrderId },
-      data: {
-        paymentStatus: 'SUCCESS',
-        razorpayPaymentId,
-        transactionData: { razorpaySignature } as any,
+    // Safety Check: Ensure the logged-in user owns this order
+    if (order.userId !== (req as any).user?.id) {
+      return next(new AppError('Unauthorized: You do not own this order', 403));
+    }
+
+    const paymentRecord = await prisma.payment.findFirst({
+      where: {
+        orderId,
+        paymentMethod: 'THAWANI',
+      },
+      orderBy: {
+        createdAt: 'desc',
       },
     });
 
-    // Find the associated order
-    const paymentRecord = await prisma.payment.findFirst({
-      where: { razorpayOrderId },
+    if (!paymentRecord || !paymentRecord.razorpayOrderId) {
+      return next(new AppError('Payment record not found for this order', 404));
+    }
+
+    const thawaniSessionId = paymentRecord.razorpayOrderId;
+    const baseUrl = env.THAWANI_ENV === 'prod' ? 'https://checkout.thawani.om' : 'https://uatcheckout.thawani.om';
+
+    const response = await fetch(`${baseUrl}/api/v1/checkout/session/${thawaniSessionId}`, {
+      method: 'GET',
+      headers: {
+        'thawani-api-key': env.THAWANI_API_KEY,
+      },
     });
+
+    const result = await response.json() as any;
+
+    if (!response.ok || !result.success) {
+      return next(new AppError(result.message || 'Failed to verify Thawani session', 400));
+    }
+
+    const paymentStatus = result.data.payment_status;
 
     let updatedOrder = null;
 
-    if (paymentRecord) {
+    if (paymentStatus === 'paid') {
+      // Update payment record
+      await prisma.payment.update({
+        where: { id: paymentRecord.id },
+        data: {
+          paymentStatus: 'SUCCESS',
+          transactionData: result.data,
+        },
+      });
+
+      // Update Order
       updatedOrder = await prisma.order.update({
-        where: { id: paymentRecord.orderId },
+        where: { id: orderId },
         data: {
           paymentStatus: 'SUCCESS',
           orderStatus: 'PENDING',
@@ -121,6 +190,7 @@ export const verifyRazorpayPayment = async (req: Request, res: Response, next: N
         include: { items: true, payments: true },
       });
 
+      // Clear Cart if user is authenticated
       if (updatedOrder.userId) {
         const cart = await prisma.cart.findFirst({
           where: { userId: updatedOrder.userId },
@@ -133,6 +203,17 @@ export const verifyRazorpayPayment = async (req: Request, res: Response, next: N
           });
         }
       }
+    } else {
+      // Mark as failed/cancelled
+      await prisma.payment.update({
+        where: { id: paymentRecord.id },
+        data: {
+          paymentStatus: paymentStatus === 'cancelled' ? 'CANCELLED' : 'FAILED',
+          transactionData: result.data,
+        },
+      });
+
+      return next(new AppError(`Payment not successful. Status: ${paymentStatus}`, 400));
     }
 
     res.status(200).json({

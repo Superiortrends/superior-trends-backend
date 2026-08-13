@@ -52,9 +52,10 @@ const envSchema = z.object({
   TWILIO_FROM_NUMBER: z.string(),
   TWILIO_MESSAGING_SERVICE_SID: z.string().optional().default(''),
 
-  // Razorpay Gateway
-  RAZORPAY_KEY_ID: z.string().optional().default(''),
-  RAZORPAY_KEY_SECRET: z.string().optional().default(''),
+  // Thawani Gateway
+  THAWANI_ENV: z.string().optional().default('uat'),
+  THAWANI_API_KEY: z.string().optional().default('rRQ26GcsZzoEhbrP2HZvLYDbn9C9et'),
+  THAWANI_PUBLISHABLE_KEY: z.string().optional().default('HGvTMLDssJghr9tlN9gr4DVYt0qyBy'),
 });
 
 const parsed = envSchema.safeParse(process.env);
