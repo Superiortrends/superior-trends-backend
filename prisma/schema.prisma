@@ -18,22 +18,23 @@ enum ProductType {
 }
 
 model User {
-  id            String     @id @default(uuid()) @db.Uuid
-  name          String
-  email         String     @unique
-  password      String
-  phone         String?
-  role          Role       @default(USER)
-  avatar        String?
-  emailVerified Boolean    @default(false) @map("email_verified")
-  status        Boolean    @default(true)
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
-  addresses     Address[]
-  wishlists     Wishlist[]
-  reviews       Review[]
-  carts         Cart[]
-  orders        Order[]
+  id                String     @id @default(uuid()) @db.Uuid
+  name              String
+  email             String     @unique
+  password          String
+  phone             String?
+  role              Role       @default(USER)
+  avatar            String?
+  emailVerified     Boolean    @default(false) @map("email_verified")
+  status            Boolean    @default(true)
+  thawaniCustomerId String?    @unique @map("thawani_customer_id")
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+  addresses         Address[]
+  wishlists         Wishlist[]
+  reviews           Review[]
+  carts             Cart[]
+  orders            Order[]
 
   @@map("users")
 }
@@ -289,6 +290,8 @@ model Payment {
   paymentStatus     String   @map("payment_status")
   razorpayPaymentId String?  @map("razorpay_payment_id")
   razorpayOrderId   String?  @map("razorpay_order_id")
+  thawaniInvoice    String?  @map("thawani_invoice")
+  thawaniRefundId   String?  @map("thawani_refund_id")
   amount            Decimal  @db.Decimal(10, 2)
   transactionData   Json?    @map("transaction_data")
   createdAt         DateTime @default(now()) @map("created_at")
