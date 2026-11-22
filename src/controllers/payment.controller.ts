@@ -3,6 +3,7 @@ import { prisma } from '../config/db.js';
 import { env } from '../config/env.js';
 import { AppError } from '../middlewares/error.middleware.js';
 import { getThawaniCheckoutBaseUrl, thawaniRequest } from '../services/thawani.service.js';
+import { settleThawaniSession } from '../services/orderPayment.service.js';
 
 /** Returns the user's saved Thawani customer_id, creating one via the Thawani API if it doesn't exist yet. */
 const getOrCreateThawaniCustomer = async (userId: string, email: string): Promise<string> => {
@@ -111,7 +112,7 @@ export const createThawaniSession = async (req: Request, res: Response, next: Ne
         orderId: order.id,
         paymentMethod: 'THAWANI',
         paymentStatus: 'PENDING',
-        razorpayOrderId: thawaniSessionId, // Using razorpayOrderId to store session ID to avoid migration
+        thawaniSessionId,
         thawaniInvoice: result.data.invoice,
         amount: order.total,
         transactionData: { thawaniSessionId } as any,
@@ -125,6 +126,39 @@ export const createThawaniSession = async (req: Request, res: Response, next: Ne
         redirectUrl,
       },
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Called when the customer leaves/cancels the Thawani page. If the payment really wasn't completed the
+ * unpaid order is cancelled and its stock put back; a paid order is never touched.
+ */
+export const cancelThawaniPayment = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { orderId } = req.body;
+    if (!orderId || typeof orderId !== 'string') {
+      return next(new AppError('Order ID is required', 400));
+    }
+
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order || order.userId !== (req as any).user?.id) {
+      return next(new AppError('Order not found', 404));
+    }
+
+    const payment = await prisma.payment.findFirst({
+      where: { orderId, paymentMethod: 'THAWANI' },
+      orderBy: { createdAt: 'desc' },
+    });
+    // Saved-card (payment intent) flow is verified separately — never auto-cancel it from here.
+    if (!payment || payment.thawaniPaymentId) {
+      res.status(200).json({ status: 'success', data: { result: 'skipped' } });
+      return;
+    }
+
+    const result = await settleThawaniSession(payment, { cancelIfUnpaid: true, reason: 'cancelled by customer' });
+    res.status(200).json({ status: 'success', data: { result } });
   } catch (error) {
     next(error);
   }
@@ -161,11 +195,11 @@ export const verifyThawaniPayment = async (req: Request, res: Response, next: Ne
       },
     });
 
-    if (!paymentRecord || !paymentRecord.razorpayOrderId) {
+    if (!paymentRecord || !paymentRecord.thawaniSessionId) {
       return next(new AppError('Payment record not found for this order', 404));
     }
 
-    const thawaniSessionId = paymentRecord.razorpayOrderId;
+    const thawaniSessionId = paymentRecord.thawaniSessionId;
     const baseUrl = env.THAWANI_ENV === 'prod' ? 'https://checkout.thawani.om' : 'https://uatcheckout.thawani.om';
 
     const response = await fetch(`${baseUrl}/api/v1/checkout/session/${thawaniSessionId}`, {
@@ -345,7 +379,7 @@ export const payWithSavedCard = async (req: Request, res: Response, next: NextFu
         orderId: order.id,
         paymentMethod: 'THAWANI',
         paymentStatus: succeeded ? 'SUCCESS' : 'PENDING',
-        razorpayPaymentId: paymentIntentId, // Reused field to store the Thawani payment intent ID
+        thawaniPaymentId: paymentIntentId,
         amount: order.total,
         transactionData: confirmResult.data as any,
       },
@@ -391,15 +425,15 @@ export const verifyThawaniPaymentIntent = async (req: Request, res: Response, ne
     }
 
     const paymentRecord = await prisma.payment.findFirst({
-      where: { orderId, paymentMethod: 'THAWANI', razorpayPaymentId: { not: null } },
+      where: { orderId, paymentMethod: 'THAWANI', thawaniPaymentId: { not: null } },
       orderBy: { createdAt: 'desc' },
     });
 
-    if (!paymentRecord?.razorpayPaymentId) {
+    if (!paymentRecord?.thawaniPaymentId) {
       return next(new AppError('Payment record not found for this order', 404));
     }
 
-    const result = await thawaniRequest<{ data: { status: string } }>('GET', `/payment_intents/${paymentRecord.razorpayPaymentId}`);
+    const result = await thawaniRequest<{ data: { status: string } }>('GET', `/payment_intents/${paymentRecord.thawaniPaymentId}`);
     const succeeded = result.data.status === 'succeeded';
 
     await prisma.payment.update({
@@ -450,8 +484,8 @@ export const refundThawaniPayment = async (req: Request, res: Response, next: Ne
     let invoice = paymentRecord.thawaniInvoice;
 
     // Backward-compat: older payment rows created before the invoice was stored — fetch it from the session.
-    if (!invoice && paymentRecord.razorpayOrderId) {
-      const session = await thawaniRequest<{ data: { invoice: string } }>('GET', `/checkout/session/${paymentRecord.razorpayOrderId}`);
+    if (!invoice && paymentRecord.thawaniSessionId) {
+      const session = await thawaniRequest<{ data: { invoice: string } }>('GET', `/checkout/session/${paymentRecord.thawaniSessionId}`);
       invoice = session.data.invoice;
     }
 

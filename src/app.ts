@@ -13,6 +13,7 @@ import collectionRoutes from './routes/collection.routes.js';
 import cartRoutes from './routes/cart.routes.js';
 import orderRoutes from './routes/order.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
+import { thawaniWebhook } from './controllers/thawaniWebhook.controller.js';
 import addressRoutes from './routes/address.routes.js';
 import wishlistRoutes from './routes/wishlist.routes.js';
 import reviewRoutes from './routes/review.routes.js';
@@ -63,6 +64,11 @@ app.use(
   })
 );
 app.use(cookieParser());
+
+// Thawani webhook needs the RAW body to verify its HMAC signature, so it is mounted
+// before express.json(). Public endpoint — authenticity is enforced by the signature.
+app.post('/api/v1/payment/thawani/webhook', express.raw({ type: '*/*', limit: '1mb' }), thawaniWebhook);
+
 app.use(express.json());
 
 // Redirect morgan logs to Winston

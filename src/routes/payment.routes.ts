@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   createThawaniSession,
   verifyThawaniPayment,
+  cancelThawaniPayment,
   listSavedCards,
   deleteSavedCard,
   payWithSavedCard,
@@ -16,6 +17,7 @@ router.use(protect);
 
 router.post('/thawani/create-session', createThawaniSession);
 router.post('/thawani/verify', verifyThawaniPayment);
+router.post('/thawani/cancel', cancelThawaniPayment);
 
 router.get('/thawani/saved-cards', listSavedCards);
 router.delete('/thawani/saved-cards/:cardId', deleteSavedCard);

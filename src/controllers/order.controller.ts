@@ -1,32 +1,18 @@
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../config/db.js';
 import { AppError } from '../middlewares/error.middleware.js';
+import { computeShipping, getDeliverySettings } from '../services/settings.service.js';
 import {
   ORDER_STATUS,
   getNextOrderStatuses,
   isValidOrderStatus,
 } from '../constants/orderStatus.js';
 import { emitOrderUpdated, emitStockUpdated } from '../socket/socket.js';
+import { isPlacedOrder, placedOrderWhere } from '../constants/orderVisibility.js';
 
 const generateOrderNumber = () => `ST-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-/** Orders the customer actually placed: paid online or confirmed COD (not abandoned Razorpay checkout). */
-const placedOrderWhere = {
-  OR: [
-    { paymentStatus: 'SUCCESS' as const },
-    { payments: { some: { paymentMethod: 'COD' as const } } },
-  ],
-};
-
-function isPlacedOrder(order: {
-  paymentStatus: string;
-  payments?: { paymentMethod: string }[];
-}): boolean {
-  if (order.paymentStatus === 'SUCCESS') return true;
-  return (order.payments ?? []).some((p) => p.paymentMethod === 'COD');
-}
-
-async function restoreOrderStock(tx: any, orderId: string): Promise<void> {
+export async function restoreOrderStock(tx: any, orderId: string): Promise<void> {
   const order = await tx.order.findUnique({
     where: { id: orderId },
     include: { items: true },
@@ -105,9 +91,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
     }
 
     if (paymentMethod === 'COD') {
-      const codSetting = await prisma.setting.findUnique({ where: { key: 'cod_allowed' } });
-      const isCodAllowed = (codSetting?.value ?? 'true') === 'true';
-      if (!isCodAllowed) {
+      const { codAllowed } = await getDeliverySettings();
+      if (!codAllowed) {
         return next(new AppError('Cash on Delivery (COD) is not allowed', 400));
       }
     }
@@ -265,10 +250,7 @@ export const createCheckoutOrder = async (req: Request, res: Response, next: Nex
     const {
       shippingAddress,
       items,
-      subtotal,
       discount = 0,
-      shipping = 0,
-      tax = 0,
       total,
       notes,
       paymentMethod = 'THAWANI',
@@ -287,12 +269,10 @@ export const createCheckoutOrder = async (req: Request, res: Response, next: Nex
       return next(new AppError('Payment method must be THAWANI or COD', 400));
     }
 
-    if (method === 'COD') {
-      const codSetting = await prisma.setting.findUnique({ where: { key: 'cod_allowed' } });
-      const isCodAllowed = (codSetting?.value ?? 'true') === 'true';
-      if (!isCodAllowed) {
-        return next(new AppError('Cash on Delivery (COD) is not allowed', 400));
-      }
+    // Delivery / COD rules come from Admin → Settings (never from the client)
+    const delivery = await getDeliverySettings();
+    if (method === 'COD' && !delivery.codAllowed) {
+      return next(new AppError('Cash on Delivery (COD) is not allowed', 400));
     }
 
     const addressJson = {
@@ -328,14 +308,24 @@ export const createCheckoutOrder = async (req: Request, res: Response, next: Nex
             }
             const image =
               item.image?.trim() || (await getProductMainImage(item.productId));
+            // Price always comes from the database — never trust the price sent by the browser.
+            let unitPrice = Number(product.salePrice ?? product.mrp);
+            if (item.variantId) {
+              const variant = await tx.productVariant.findUnique({ where: { id: item.variantId } });
+              if (!variant || variant.productId !== product.id) {
+                throw new AppError(`Product variant not found: ${item.variantId}`, 404);
+              }
+              unitPrice = Number(variant.salePrice ?? variant.mrp);
+            }
+            const quantity = Math.max(1, Math.min(Math.floor(Number(item.quantity)) || 1, 100));
             return {
               productId: item.productId,
               variantId: item.variantId || null,
               productName: item.productName || product.name,
               sku: item.sku || product.sku,
               image,
-              quantity: Number(item.quantity) || 1,
-              price: Number(item.price) || Number(product.salePrice),
+              quantity,
+              price: unitPrice,
             };
           }
         )
@@ -375,15 +365,21 @@ export const createCheckoutOrder = async (req: Request, res: Response, next: Nex
         }
       }
 
+      // Amounts are recomputed on the server: subtotal from DB prices, shipping from Admin → Settings.
+      const serverSubtotal = itemRows.reduce((sum, r) => sum + r.price * r.quantity, 0);
+      const serverShipping = computeShipping(serverSubtotal, delivery);
+      const serverDiscount = Math.min(Math.max(Number(discount) || 0, 0), serverSubtotal);
+      const serverTotal = Math.round(serverSubtotal - serverDiscount + serverShipping);
+
       const createdOrder = await tx.order.create({
         data: {
           userId,
           orderNumber,
-          subtotal: Number(subtotal) || 0,
-          discount: Number(discount) || 0,
-          shipping: Number(shipping) || 0,
-          tax: Number(tax) || 0,
-          total: Number(total),
+          subtotal: serverSubtotal,
+          discount: serverDiscount,
+          shipping: serverShipping,
+          tax: 0,
+          total: serverTotal,
           paymentStatus: method === 'COD' ? 'PENDING' : 'PENDING',
           orderStatus: ORDER_STATUS.PENDING,
           shippingAddress: addressJson,
@@ -440,7 +436,9 @@ export const createCheckoutOrder = async (req: Request, res: Response, next: Nex
 
 export const getAllOrders = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
+    // Only real orders: payment confirmed, or COD. Unpaid online checkouts stay hidden.
     const orders = await prisma.order.findMany({
+      where: placedOrderWhere,
       include: {
         items: true,
         payments: true,
@@ -564,6 +562,10 @@ export const cancelOrderCustomer = async (req: Request, res: Response, next: Nex
 
     if (order.orderStatus !== ORDER_STATUS.PENDING) {
       return next(new AppError('Only pending orders can be cancelled', 400));
+    }
+
+    if (order.paymentStatus === 'SUCCESS' && !order.payments.some((p) => p.paymentMethod === 'COD')) {
+      return next(new AppError('This order is already paid. Please contact support to cancel it and get a refund.', 400));
     }
 
     const updatedOrder = await prisma.$transaction(async (tx) => {

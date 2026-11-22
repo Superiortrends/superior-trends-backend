@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { upload } from '../middlewares/upload.middleware.js';
-import { uploadOnCloudinary } from '../config/cloudinary.js';
+import { uploadOnImageKit } from '../config/imagekit.js';
 import { protect, restrictTo } from '../middlewares/auth.middleware.js';
 import { AppError } from '../middlewares/error.middleware.js';
 
@@ -17,9 +17,9 @@ router.post(
         return next(new AppError('Please upload an image file.', 400));
       }
 
-      const result = await uploadOnCloudinary(req.file.buffer, {
-        folder: 'superior_trends',
-        resource_type: 'image',
+      const result = await uploadOnImageKit(req.file.buffer, {
+        folder: '/superior_trends',
+        mimeType: req.file.mimetype,
       });
 
       if (!result) {

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../config/db.js';
 import { AppError } from '../middlewares/error.middleware.js';
+import { computeShipping, getDeliverySettings } from '../services/settings.service.js';
 
 const cartItemInclude = {
   product: {
@@ -53,22 +54,12 @@ const recalculateCartTotals = async (cartId: string) => {
     subtotal += Number(item.price) * item.quantity;
   }
 
-  // Load dynamic settings
-  const settings = await prisma.setting.findMany({
-    where: {
-      key: {
-        in: ['free_shipping_threshold', 'shipping_charge'],
-      },
-    },
-  });
-
-  const settingsMap = new Map(settings.map((s) => [s.key, s.value]));
-  const freeShippingThreshold = Number(settingsMap.get('free_shipping_threshold') ?? '1500');
-  const standardShippingCharge = Number(settingsMap.get('shipping_charge') ?? '100');
+  // Delivery rules come from Admin → Settings
+  const delivery = await getDeliverySettings();
 
   // Assuming flat 5% tax
   const tax = subtotal * 0.05;
-  const shipping = subtotal >= freeShippingThreshold || subtotal === 0 ? 0 : standardShippingCharge;
+  const shipping = computeShipping(subtotal, delivery);
   const total = subtotal + tax + shipping;
 
   await prisma.cart.update({

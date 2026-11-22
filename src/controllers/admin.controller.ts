@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { prisma } from '../config/db.js';
+import { prisma } from '../config/db.js';
+import { placedOrderWhere } from '../constants/orderVisibility.js';
 
 /** HomepageSection delegate may be missing if Prisma client was not regenerated */
 async function countHomepageSections(): Promise<number> {
@@ -41,7 +42,7 @@ export const getAdminStats = async (_req: Request, res: Response, next: NextFunc
         where: { status: true },
         _sum: { stock: true },
       }),
-      prisma.order.count(),
+      prisma.order.count({ where: placedOrderWhere }),
       prisma.order.count({ where: { paymentStatus: 'SUCCESS' } }),
       prisma.order.aggregate({
         where: { paymentStatus: 'SUCCESS' },

@@ -32,10 +32,15 @@ const envSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string(),
   AWS_S3_BUCKET_NAME: z.string(),
 
-  // Cloudinary configuration
-  CLOUDINARY_CLOUD_NAME: z.string(),
-  CLOUDINARY_API_KEY: z.string(),
-  CLOUDINARY_API_SECRET: z.string(),
+  // ImageKit configuration (private key is server-side only)
+  IMAGEKIT_URL_ENDPOINT: z.string().url(),
+  IMAGEKIT_PUBLIC_KEY: z.string().min(1),
+  IMAGEKIT_PRIVATE_KEY: z.string().min(1),
+
+  // Cloudinary (legacy — no longer used for uploads, optional)
+  CLOUDINARY_CLOUD_NAME: z.string().optional().default(''),
+  CLOUDINARY_API_KEY: z.string().optional().default(''),
+  CLOUDINARY_API_SECRET: z.string().optional().default(''),
 
   // Redis configurations
   REDIS_URL: z.string().default('redis://localhost:6379'),
@@ -52,10 +57,12 @@ const envSchema = z.object({
   TWILIO_FROM_NUMBER: z.string(),
   TWILIO_MESSAGING_SERVICE_SID: z.string().optional().default(''),
 
-  // Thawani Gateway
-  THAWANI_ENV: z.string().optional().default('uat'),
-  THAWANI_API_KEY: z.string().optional().default('rRQ26GcsZzoEhbrP2HZvLYDbn9C9et'),
-  THAWANI_PUBLISHABLE_KEY: z.string().optional().default('HGvTMLDssJghr9tlN9gr4DVYt0qyBy'),
+  // Thawani Gateway — no hardcoded fallbacks: keys must come from the environment.
+  THAWANI_ENV: z.enum(['uat', 'prod']).default('uat'),
+  THAWANI_API_KEY: z.string().min(1),
+  THAWANI_PUBLISHABLE_KEY: z.string().min(1),
+  // Webhook signing secret (Thawani portal → Developers → Webhook). Empty = webhook rejects everything.
+  THAWANI_WEBHOOK_SECRET: z.string().optional().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);
