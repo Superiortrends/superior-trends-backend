@@ -1,6 +1,6 @@
 import http from 'http';
 import app from './app.js';
-import { connectDB } from './config/db.js';
+import { connectDB, disconnectDB } from './config/db.js';
 import { env } from './config/env.js';
 import { initSocketIO } from './socket/socket.js';
 import { sweepUnpaidOnlineOrders } from './services/orderPayment.service.js';
@@ -26,6 +26,24 @@ const startServer = async () => {
     console.log(`🚀 Server running in ${env.NODE_ENV} mode on http://localhost:${env.PORT}`);
     console.log(`🔌 WebSocket ready for real-time order updates`);
   });
+
+  // Graceful shutdown: on a deploy/restart (SIGTERM) release the database connections right away,
+  // so the new instance isn't blocked by the old one still holding them.
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`${signal} received — shutting down`);
+    clearInterval(sweepTimer);
+    const force = setTimeout(() => process.exit(0), 8_000);
+    force.unref();
+    httpServer.close(async () => {
+      await disconnectDB();
+      process.exit(0);
+    });
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 
   process.on('unhandledRejection', (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
