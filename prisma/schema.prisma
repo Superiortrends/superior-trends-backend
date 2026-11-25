@@ -405,6 +405,15 @@ model ContactMessage {
   @@map("contact_messages")
 }
 
+model NewsletterSubscriber {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("newsletter_subscribers")
+}
+
 model BlogCategory {
   id        String     @id @default(uuid()) @db.Uuid
   name      String     @unique

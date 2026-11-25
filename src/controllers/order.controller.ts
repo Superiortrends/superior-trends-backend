@@ -34,6 +34,37 @@ export async function restoreOrderStock(tx: any, orderId: string): Promise<void>
   }
 }
 
+/** Inverse of restoreOrderStock: used when a cancelled order is re-opened by an admin. */
+export async function deductOrderStock(tx: any, orderId: string): Promise<void> {
+  const order = await tx.order.findUnique({
+    where: { id: orderId },
+    include: { items: true },
+  });
+  if (!order) return;
+
+  for (const item of order.items) {
+    if (item.variantId) {
+      const variant = await tx.productVariant.findUnique({ where: { id: item.variantId } });
+      if (!variant || variant.stock < item.quantity) {
+        throw new AppError(`Cannot re-open order: insufficient stock for ${item.productName}`, 400);
+      }
+      await tx.productVariant.update({
+        where: { id: item.variantId },
+        data: { stock: { decrement: item.quantity } },
+      });
+    } else {
+      const product = await tx.product.findUnique({ where: { id: item.productId } });
+      if (!product || product.stock < item.quantity) {
+        throw new AppError(`Cannot re-open order: insufficient stock for ${item.productName}`, 400);
+      }
+      await tx.product.update({
+        where: { id: item.productId },
+        data: { stock: { decrement: item.quantity } },
+      });
+    }
+  }
+}
+
 async function sendStockUpdatesForOrder(order: any): Promise<void> {
   try {
     const items = order.items || [];
@@ -608,6 +639,7 @@ export const updateOrderStatus = async (req: Request, res: Response, next: NextF
 
     const existing = await prisma.order.findUnique({
       where: { id },
+      include: { payments: true },
     });
     if (!existing) {
       return next(new AppError('Order not found', 404));
@@ -635,9 +667,19 @@ export const updateOrderStatus = async (req: Request, res: Response, next: NextF
       updatedData.paymentStatus = paymentStatus;
     }
 
+    const prevStatus = existing.orderStatus;
+    const nextStatus = updatedData.orderStatus;
+    const becomesCancelled = nextStatus === ORDER_STATUS.CANCELLED && prevStatus !== ORDER_STATUS.CANCELLED;
+    const reopensCancelled = prevStatus === ORDER_STATUS.CANCELLED && !!nextStatus && nextStatus !== ORDER_STATUS.CANCELLED;
+    const leavesDelivered = prevStatus === ORDER_STATUS.DELIVERED && !!nextStatus && nextStatus !== ORDER_STATUS.DELIVERED;
+
     const order = await prisma.$transaction(async (tx) => {
-      if (updatedData.orderStatus === ORDER_STATUS.CANCELLED) {
+      // Stock stays in sync with the cancelled state (restore once, re-deduct on re-open)
+      if (becomesCancelled) {
         await restoreOrderStock(tx, id);
+      }
+      if (reopensCancelled) {
+        await deductOrderStock(tx, id);
       }
 
       if (orderStatus === 'DELIVERED') {
@@ -646,6 +688,19 @@ export const updateOrderStatus = async (req: Request, res: Response, next: NextF
           where: { orderId: id },
           data: { paymentStatus: 'SUCCESS' },
         });
+      }
+
+      // Delivered marks COD as paid; undo that if the admin moves the order back.
+      // Online (e.g. Thawani) payments really were paid, so they are left alone.
+      if (leavesDelivered && !paymentStatus) {
+        const codOnly = existing.payments.every((p) => p.paymentMethod === 'COD');
+        if (codOnly) {
+          updatedData.paymentStatus = 'PENDING';
+          await tx.payment.updateMany({
+            where: { orderId: id, paymentMethod: 'COD' },
+            data: { paymentStatus: 'PENDING' },
+          });
+        }
       }
 
       return await tx.order.update({
@@ -668,7 +723,7 @@ export const updateOrderStatus = async (req: Request, res: Response, next: NextF
       },
     });
 
-    if (updatedData.orderStatus === ORDER_STATUS.CANCELLED) {
+    if (becomesCancelled || reopensCancelled) {
       sendStockUpdatesForOrder(order).catch((err) =>
         console.error('Failed to send stock updates:', err)
       );

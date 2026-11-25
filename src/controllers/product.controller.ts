@@ -103,7 +103,8 @@ export const getProducts = async (req: Request, res: Response, next: NextFunctio
       prisma.product.count({ where }),
     ]);
 
-    res.set('Cache-Control', CACHE_PUBLIC);
+    // Admin lists must always be fresh (and never publicly cacheable)
+    res.set('Cache-Control', isAdminList ? 'no-store' : CACHE_PUBLIC);
     res.status(200).json({
       status: 'success',
       results: products.length,

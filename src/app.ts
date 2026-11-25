@@ -25,8 +25,12 @@ import blogRoutes from './routes/blog.routes.js';
 import settingsRoutes from './routes/settings.routes.js';
 import couponRoutes from './routes/coupon.routes.js';
 import bannerRoutes from './routes/banner.routes.js';
+import newsletterRoutes from './routes/newsletter.routes.js';
 
 const app = express();
+
+// Behind Render's single reverse proxy: makes req.ip the real client IP (needed by the rate limiter)
+app.set('trust proxy', 1);
 
 // Standard middlewares
 app.use(helmet());
@@ -92,6 +96,7 @@ app.use('/api/v1/upload', uploadRoutes);
 app.use('/api/v1/sections', sectionRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/contact', contactRoutes);
+app.use('/api/v1/newsletter', newsletterRoutes);
 app.use('/api/v1/blogs', blogRoutes);
 app.use('/api/v1/settings', settingsRoutes);
 app.use('/api/v1/coupons', couponRoutes);

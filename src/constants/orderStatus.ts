@@ -31,12 +31,8 @@ export function isValidOrderStatus(value: string): value is OrderStatus {
 }
 
 export function getNextOrderStatuses(current: string): OrderStatus[] {
-  const currentStatus = current as OrderStatus;
-  // Terminal statuses
-  if (currentStatus === ORDER_STATUS.DELIVERED || currentStatus === ORDER_STATUS.CANCELLED) {
-    return [];
-  }
-  // Return all other statuses
-  return ORDER_STATUS_FLOW.filter(status => status !== currentStatus);
+  // Admins may correct any status (including Delivered / Cancelled).
+  // Side effects (stock, COD payment) are handled in updateOrderStatus.
+  return ORDER_STATUS_FLOW.filter(status => status !== current);
 }
 
